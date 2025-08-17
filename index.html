@@ -1,72 +1,204 @@
+"use client"; import React, { useEffect, useMemo, useState } from "react";
 
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ポエムボード</title>
-  <!-- Tailwind CSS -->
-  <script src="https://cdn.tailwindcss.com"></script>
-  <!-- React / ReactDOM -->
-  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-  <!-- Babel (JSX変換用) -->
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-</head>
-<body class="bg-gray-100 flex items-center justify-center min-h-screen">
-  <div id="root" class="w-full max-w-md"></div>
+// Alice Chess (Two-Board) — v2 // 機能追加: キャスリング / アンパッサン / 昇格コマ選択 / 盤反転 // 注意: 学習用プロトタイプ。競技レベルの厳密性までは担保しません。
 
-  <script type="text/babel">
-    const { useState } = React;
+// ————— 型 ————— type Color = "w" | "b";
 
-    function App() {
-      const [poems, setPoems] = useState([
-        "雨上がりの光、ガラス越しに揺れる。",
-        "静けさにひそむ声を聞いた気がする。",
-        "風がページをめくり、知らない物語を開く。"
-      ]);
-      const [input, setInput] = useState("");
+type PieceType = "p" | "n" | "b" | "r" | "q" | "k";
 
-      const addPoem = () => {
-        if (input.trim() !== "") {
-          setPoems([input, ...poems]);
-          setInput("");
-        }
-      };
+type Piece = { t: PieceType; c: Color; id: number };
 
-      return (
-        <div className="bg-white shadow-xl rounded-2xl p-6 w-full">
-          <h1 className="text-2xl font-bold mb-4 text-center">🌿 ポエムボード</h1>
-          <div className="flex mb-4">
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              className="flex-grow border rounded-l-lg px-3 py-2 focus:outline-none"
-              placeholder="ポエムを入力..."
-            />
-            <button
-              onClick={addPoem}
-              className="bg-green-500 text-white px-4 py-2 rounded-r-lg hover:bg-green-600"
-            >
-              投稿
-            </button>
-          </div>
-          <ul className="space-y-3 max-h-80 overflow-y-auto">
-            {poems.map((poem, index) => (
-              <li
-                key={index}
-                className="p-3 bg-gray-50 border rounded-lg shadow-sm hover:bg-gray-100"
-              >
-                {poem}
-              </li>
-            ))}
-          </ul>
-        </div>
-      );
+type BoardID = "A" | "B";
+
+type Square = { r: number; c: number };
+
+type Boards = { A: (Piece | null)[][]; B: (Piece | null)[][] };
+
+type Move = { kind: "normal" | "castle_kingside" | "castle_queenside" | "enpassant"; from: Square; to: Square; // fromBoard 内での移動先 fromBoard: BoardID; capture: boolean; // fromBoard での取り promotion?: PieceType; // 最終ワープ後の駒種 };
+
+// 履歴管理用フラグ interface StateFlags { moved: Set<number>; // 動いたことのある駒ID（キャスリング判定用） ep: null | { board: BoardID; sq: Square; pawnId: number; pawnSq: Square }; // アンパッサン権 }
+
+// ————— 定数 ————— const UNICODE: Record<PieceType, { w: string; b: string }> = { p: { w: "♙", b: "♟" }, n: { w: "♘", b: "♞" }, b: { w: "♗", b: "♝" }, r: { w: "♖", b: "♜" }, q: { w: "♕", b: "♛" }, k: { w: "♔", b: "♚" }, };
+
+const PIECE_VALUE: Record<PieceType, number> = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 20000 }; const DIRS_KNIGHT = [ { dr: -2, dc: -1 }, { dr: -2, dc: 1 }, { dr: -1, dc: -2 }, { dr: -1, dc: 2 }, { dr: 1, dc: -2 }, { dr: 1, dc: 2 }, { dr: 2, dc: -1 }, { dr: 2, dc: 1 }, ]; const DIRS_BISHOP = [ { dr: -1, dc: -1 }, { dr: -1, dc: 1 }, { dr: 1, dc: -1 }, { dr: 1, dc: 1 }, ]; const DIRS_ROOK = [ { dr: -1, dc: 0 }, { dr: 1, dc: 0 }, { dr: 0, dc: -1 }, { dr: 0, dc: 1 }, ];
+
+// ————— ユーティリティ ————— const inBounds = (r: number, c: number) => r >= 0 && r < 8 && c >= 0 && c < 8; const files = "abcdefgh"; const algebra = (sq: Square) => files[sq.c] + (8 - sq.r); const otherBoard = (id: BoardID) => (id === "A" ? "B" : "A");
+
+function deepCloneBoards(b: Boards): Boards { return { A: b.A.map((row) => row.slice()), B: b.B.map((row) => row.slice()) }; }
+
+function deepCloneGrid<T>(g: T[][]): T[][] { return g.map((row) => row.slice()); }
+
+// ————— 初期配置 ————— let NEXT_ID = 1; function makePiece(t: PieceType, c: Color): Piece { return { t, c, id: NEXT_ID++ }; }
+
+function initBoards(): Boards { const empty = Array.from({ length: 8 }, () => Array<Piece | null>(8).fill(null)); const A = deepCloneGrid(empty); const B = deepCloneGrid(empty); // black A[0][0] = makePiece("r", "b"); A[0][1] = makePiece("n", "b"); A[0][2] = makePiece("b", "b"); A[0][3] = makePiece("q", "b"); A[0][4] = makePiece("k", "b"); A[0][5] = makePiece("b", "b"); A[0][6] = makePiece("n", "b"); A[0][7] = makePiece("r", "b"); for (let c = 0; c < 8; c++) A[1][c] = makePiece("p", "b"); // white for (let c = 0; c < 8; c++) A[6][c] = makePiece("p", "w"); A[7][0] = makePiece("r", "w"); A[7][1] = makePiece("n", "w"); A[7][2] = makePiece("b", "w"); A[7][3] = makePiece("q", "w"); A[7][4] = makePiece("k", "w"); A[7][5] = makePiece("b", "w"); A[7][6] = makePiece("n", "w"); A[7][7] = makePiece("r", "w"); return { A, B }; }
+
+// ————— 攻撃判定（同一ボード内） ————— function findKing(boards: Boards, color: Color): { board: BoardID; sq: Square; id: number } | null { for (const id of ["A", "B"] as BoardID[]) { for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) { const p = boards[id][r][c]; if (p && p.c === color && p.t === "k") return { board: id, sq: { r, c }, id: p.id }; } } return null; }
+
+function isSquareAttackedBy(boards: Boards, board: BoardID, target: Square, by: Color): boolean { const grid = boards[board]; // knights for (const d of DIRS_KNIGHT) { const r = target.r + d.dr, c = target.c + d.dc; if (!inBounds(r, c)) continue; const p = grid[r][c]; if (p && p.c === by && p.t === "n") return true; } // rook/queen (straight) for (const d of DIRS_ROOK) { let r = target.r + d.dr, c = target.c + d.dc; while (inBounds(r, c)) { const p = grid[r][c]; if (p) { if (p.c === by && (p.t === "r" || p.t === "q")) return true; break; } r += d.dr; c += d.dc; } } // bishop/queen (diag) for (const d of DIRS_BISHOP) { let r = target.r + d.dr, c = target.c + d.dc; while (inBounds(r, c)) { const p = grid[r][c]; if (p) { if (p.c === by && (p.t === "b" || p.t === "q")) return true; break; } r += d.dr; c += d.dc; } } // pawns const wr = target.r + 1; for (const dc of [-1, 1]) { const c = target.c + dc; if (inBounds(wr, c)) { const p = grid[wr][c]; if (p && p.c === "w" && p.t === "p" && by === "w") return true; } } const br = target.r - 1; for (const dc of [-1, 1]) { const c = target.c + dc; if (inBounds(br, c)) { const p = grid[br][c]; if (p && p.c === "b" && p.t === "p" && by === "b") return true; } } // king for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) { if (dr === 0 && dc === 0) continue; const r = target.r + dr, c = target.c + dc; if (!inBounds(r, c)) continue; const p = grid[r][c]; if (p && p.c === by && p.t === "k") return true; } return false; }
+
+function inCheck(boards: Boards, color: Color): boolean { const k = findKing(boards, color); if (!k) return false; const enemy: Color = color === "w" ? "b" : "w"; return isSquareAttackedBy(boards, k.board, k.sq, enemy); }
+
+// ————— 評価（単純） ————— function evaluate(boards: Boards, side: Color): number { let score = 0; for (const id of ["A", "B"] as BoardID[]) { for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) { const p = boards[id][r][c]; if (!p) continue; score += p.c === side ? PIECE_VALUE[p.t] : -PIECE_VALUE[p.t]; } } return score; }
+
+// ————— 合法手生成（キャスリング/EP含む） ————— function generatePseudoMovesFrom(boards: Boards, flags: StateFlags, board: BoardID, sq: Square, piece: Piece): Move[] { const moves: Move[] = []; const grid = boards[board]; const enemy: Color = piece.c === "w" ? "b" : "w";
+
+if (piece.t === "p") { const dir = piece.c === "w" ? -1 : 1; const startRow = piece.c === "w" ? 6 : 1; const one = { r: sq.r + dir, c: sq.c }; if (inBounds(one.r, one.c) && !grid[one.r][one.c]) { moves.push({ kind: "normal", from: sq, to: one, fromBoard: board, capture: false }); const two = { r: sq.r + dir * 2, c: sq.c }; if (sq.r === startRow && inBounds(two.r, two.c) && !grid[two.r][two.c]) { moves.push({ kind: "normal", from: sq, to: two, fromBoard: board, capture: false }); } } for (const dc of [-1, 1]) { const cap = { r: sq.r + dir, c: sq.c + dc }; if (!inBounds(cap.r, cap.c)) continue; const p = grid[cap.r][cap.c]; if (p && p.c === enemy) moves.push({ kind: "normal", from: sq, to: cap, fromBoard: board, capture: true }); } // en passant if (flags.ep && flags.ep.board === board) { const ep = flags.ep; if (ep && ep.sq.r === sq.r + dir && Math.abs(ep.sq.c - sq.c) === 1) { // 斜めに空マスへ移動し、相手ポーンは ep.pawnSq にいる moves.push({ kind: "enpassant", from: sq, to: ep.sq, fromBoard: board, capture: true }); } } } else if (piece.t === "n") { for (const d of DIRS_KNIGHT) { const r = sq.r + d.dr, c = sq.c + d.dc; if (!inBounds(r, c)) continue; const p = grid[r][c]; if (!p || p.c !== piece.c) moves.push({ kind: "normal", from: sq, to: { r, c }, fromBoard: board, capture: !!p }); } } else if (piece.t === "b" || piece.t === "r" || piece.t === "q") { const dirs = piece.t === "b" ? DIRS_BISHOP : piece.t === "r" ? DIRS_ROOK : [...DIRS_BISHOP, ...DIRS_ROOK]; for (const d of dirs) { let r = sq.r + d.dr, c = sq.c + d.dc; while (inBounds(r, c)) { const p = grid[r][c]; if (!p) moves.push({ kind: "normal", from: sq, to: { r, c }, fromBoard: board, capture: false }); else { if (p.c !== piece.c) moves.push({ kind: "normal", from: sq, to: { r, c }, fromBoard: board, capture: true }); break; } r += d.dr; c += d.dc; } } } else if (piece.t === "k") { for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) { if (dr === 0 && dc === 0) continue; const r = sq.r + dr, c = sq.c + dc; if (!inBounds(r, c)) continue; const p = grid[r][c]; if (!p || p.c !== piece.c) moves.push({ kind: "normal", from: sq, to: { r, c }, fromBoard: board, capture: !!p }); } // Castling (同一ボード内での経路チェック。到着後は両駒とも反対ボードへワープ) // 条件: キング未移動 / 同ボード同列に対象ルーク存在＆未移動 / 経路の駒が無い / 経路・現在地・通過地が攻撃されていない / 反対ボードの着地点が空 const enemy = piece.c === "w" ? "b" : "w"; const rank = sq.r; // kingside if (!flags.moved.has(piece.id) && !inCheck(boards, piece.c)) { // rook at h-file (c=7) const rook = grid[rank][7]; if (rook && rook.c === piece.c && rook.t === "r" && !flags.moved.has(rook.id)) { const pathEmpty = !grid[rank][5] && !grid[rank][6]; const passSafe = !isSquareAttackedBy(boards, board, { r: rank, c: 5 }, enemy) && !isSquareAttackedBy(boards, board, { r: rank, c: 6 }, enemy); // 反対ボードの着地点が空(king -> g, rook -> f) const ob = otherBoard(board); const destFree = !boards[ob][rank][6] && !boards[ob][rank][5]; if (pathEmpty && passSafe && destFree) { moves.push({ kind: "castle_kingside", from: sq, to: { r: rank, c: 6 }, fromBoard: board, capture: false }); } } // queenside const rookQ = grid[rank][0]; if (rookQ && rookQ.c === piece.c && rookQ.t === "r" && !flags.moved.has(rookQ.id)) { const pathEmptyQ = !grid[rank][1] && !grid[rank][2] && !grid[rank][3]; const passSafeQ = !isSquareAttackedBy(boards, board, { r: rank, c: 3 }, enemy) && !isSquareAttackedBy(boards, board, { r: rank, c: 2 }, enemy); const ob = otherBoard(board); const destFreeQ = !boards[ob][rank][2] && !boards[ob][rank][3]; if (pathEmptyQ && passSafeQ && destFreeQ) { moves.push({ kind: "castle_queenside", from: sq, to: { r: rank, c: 2 }, fromBoard: board, capture: false }); } } } } return moves; }
+
+function applyMove(boards: Boards, flags: StateFlags, mv: Move): { boards: Boards; flags: StateFlags } { const next = deepCloneBoards(boards); const moved = new Set(flags.moved); let ep: StateFlags["ep"] = null; const { fromBoard, from, to } = mv; const destBoard = otherBoard(fromBoard); const moving = next[fromBoard][from.r][from.c]; if (!moving) return { boards, flags };
+
+const place = (p: Piece, b: BoardID, s: Square) => { next[b][s.r][s.c] = p; }; const clear = (b: BoardID, s: Square) => { next[b][s.r][s.c] = null; };
+
+// 共通: fromBoard 側で移動・捕獲を解決 clear(fromBoard, from);
+
+if (mv.kind === "enpassant") { // to は空マス。捕獲対象は直前に2歩進んだポーンで、同ボード ep.pawnSq にいる if (flags.ep) { const capSq = flags.ep.pawnSq; clear(fromBoard, capSq); } } else { // 通常捕獲なら to を空に（敵駒除去） clear(fromBoard, to); }
+
+if (mv.kind === "castle_kingside" || mv.kind === "castle_queenside") { // キング移動先 const kingDest: Square = to; // ルーク移動先 const rank = from.r; const rookFrom: Square = mv.kind === "castle_kingside" ? { r: rank, c: 7 } : { r: rank, c: 0 }; const rookDest: Square = mv.kind === "castle_kingside" ? { r: rank, c: 5 } : { r: rank, c: 3 };
+
+const rook = boards[fromBoard][rookFrom.r][rookFrom.c]!;
+// 反対ボードへワープ配置
+const kingPlaced: Piece = { ...moving };
+const rookPlaced: Piece = { ...rook };
+place(kingPlaced, destBoard, kingDest);
+place(rookPlaced, destBoard, rookDest);
+// ルーク元は既に clear されていないので消す
+clear(fromBoard, rookFrom);
+
+moved.add(moving.id);
+moved.add(rook.id);
+ep = null; // キャスリング後のEP権は消える
+
+return { boards: next, flags: { moved, ep } };
+
+}
+
+// 昇格（移動直後に判定。プロモ未決定の場合は UI で後から差し替える） let placed: Piece = { ...moving }; const isPawnPromotion = moving.t === "p" && ((moving.c === "w" && to.r === 0) || (moving.c === "b" && to.r === 7)); if (mv.promotion) placed = { ...placed, t: mv.promotion };
+
+// 反対ボードへワープ配置 place(placed, destBoard, to);
+
+moved.add(moving.id);
+
+// アンパッサン権設定 if (moving.t === "p") { const startRow = moving.c === "w" ? 6 : 1; if (from.r === startRow && Math.abs(to.r - from.r) === 2) { const mid: Square = { r: (from.r + to.r) / 2, c: from.c }; ep = { board: fromBoard, sq: mid, pawnId: moving.id, pawnSq: to }; } else ep = null; } else { ep = null; }
+
+return { boards: next, flags: { moved, ep } }; }
+
+// ————— 合法手フィルタ（アリス仕様 + 自己チェック回避 + 反対盤空き確認 + プロモ候補付与） ————— function generateLegalMovesAll(state: { boards: Boards; flags: StateFlags }, side: Color): Move[] { const { boards, flags } = state; const res: Move[] = []; for (const id of ["A", "B"] as BoardID[]) { for (let r = 0; r < 8; r++) for (let c = 0; c < 8; c++) { const p = boards[id][r][c]; if (!p || p.c !== side) continue; const pseudo = generatePseudoMovesFrom(boards, flags, id, { r, c }, p); for (const mv of pseudo) { // 反対ボードの同座標が空でなければ不可（キャスリングは両マスチェック） const ob = otherBoard(mv.fromBoard); if (mv.kind === "castle_kingside" || mv.kind === "castle_queenside") { const rank = mv.to.r; const rookDestC = mv.kind === "castle_kingside" ? 5 : 3; if (boards[ob][rank][mv.to.c] || boards[ob][rank][rookDestC]) continue; } else { if (boards[ob][mv.to.r][mv.to.c]) continue; }
+
+// プロモ候補（UIで選択するため、段階では保持だけ）
+    let promo: PieceType | undefined = undefined;
+    if (p.t === "p" && ((p.c === "w" && mv.to.r === 0) || (p.c === "b" && mv.to.r === 7))) {
+      promo = undefined; // UIで後決め。仮では未指定
     }
 
-    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
-  </script>
-</body>
-</html>
+    // 自己チェック回避
+    const test = applyMove(boards, flags, { ...mv, promotion: promo });
+    if (!inCheck(test.boards, side)) res.push({ ...mv, promotion: promo });
+  }
+}
+
+} return res; }
+
+// ————— AI（前回と同様） ————— function pickAIMove(state: { boards: Boards; flags: StateFlags }, side: Color, mode: "random" | "greedy" | "minimax2"): Move | null { const legal = generateLegalMovesAll(state, side); if (legal.length === 0) return null; if (mode === "random") return legal[Math.floor(Math.random() * legal.length)]; if (mode === "greedy") { let best = -Infinity, pick: Move | null = null; for (const mv of legal) { const nb = applyMove(state.boards, state.flags, mv); const sc = evaluate(nb.boards, side); if (sc > best) { best = sc; pick = mv; } } return pick || legal[0]; } const opp: Color = side === "w" ? "b" : "w"; let best = -Infinity, bestMv: Move | null = null; for (const mv of legal) { const nb = applyMove(state.boards, state.flags, mv); const reply = generateLegalMovesAll(nb, opp); if (reply.length === 0) { const sc = evaluate(nb.boards, side) + (inCheck(nb.boards, opp) ? 999999 : 0); if (sc > best) { best = sc; bestMv = mv; } continue; } let worst = Infinity; for (const om of reply) { const nb2 = applyMove(nb.boards, nb.flags, om); const sc = evaluate(nb2.boards, side); if (sc < worst) worst = sc; if (worst <= best) break; } if (worst > best) { best = worst; bestMv = mv; } } return bestMv || legal[0]; }
+
+// ————— UI ————— export default function AliceChessTwoBoards_v2() { const [boards, setBoards] = useState<Boards>(() => initBoards()); const [flags, setFlags] = useState<StateFlags>({ moved: new Set<number>(), ep: null }); const [turn, setTurn] = useState<Color>("w"); const [history, setHistory] = useState<string[]>([]); const [sideHuman, setSideHuman] = useState<Color>("w"); const [aiMode, setAiMode] = useState<"random" | "greedy" | "minimax2">("greedy"); const [selected, setSelected] = useState<{ board: BoardID; sq: Square } | null>(null); const [legalTargets, setLegalTargets] = useState<Square[]>([]); const [gameOver, setGameOver] = useState<null | { result: "checkmate" | "stalemate"; winner?: Color }>(null); const [flip, setFlip] = useState<boolean>(false); const [promotionAsk, setPromotionAsk] = useState<null | { mv: Move; piece: Piece }>(null);
+
+const state = { boards, flags }; const inCheckNow = useMemo(() => ({ w: inCheck(boards, "w"), b: inCheck(boards, "b") }), [boards]);
+
+useEffect(() => { const legal = generateLegalMovesAll(state, turn); if (legal.length === 0) { const check = inCheck(boards, turn); if (check) setGameOver({ result: "checkmate", winner: turn === "w" ? "b" : "w" }); else setGameOver({ result: "stalemate" }); } else setGameOver(null); }, [boards, turn]);
+
+// AI 手 useEffect(() => { const aiSide: Color = sideHuman === "w" ? "b" : "w"; if (gameOver) return; if (turn === aiSide && !promotionAsk) { const mv = pickAIMove({ boards, flags }, aiSide, aiMode); if (!mv) return; // AIの昇格は常にクイーン const mv2 = needPromotion(mv, boards) ? { ...mv, promotion: "q" as PieceType } : mv; doMove(mv2, aiSide); } // eslint-disable-next-line react-hooks/exhaustive-deps }, [turn, sideHuman, aiMode, gameOver, promotionAsk]);
+
+function needPromotion(mv: Move, b: Boards): boolean { if (mv.kind !== "normal") return false; const p = b[mv.fromBoard][mv.from.r][mv.from.c]; if (!p || p.t !== "p") return false; return (p.c === "w" && mv.to.r === 0) || (p.c === "b" && mv.to.r === 7); }
+
+function pieceLetter(t: PieceType) { return ({ p: "P", n: "N", b: "B", r: "R", q: "Q", k: "K" } as const)[t]; }
+
+function pushHistory(mv: Move, prev: Boards, mover: Color) { const piece = prev[mv.fromBoard][mv.from.r][mv.from.c]!; const destBoard = otherBoard(mv.fromBoard); let san = ""; if (mv.kind === "castle_kingside") san = K O-O (${mv.fromBoard} → ${destBoard}); else if (mv.kind === "castle_queenside") san = K O-O-O (${mv.fromBoard} → ${destBoard}); else if (mv.kind === "enpassant") san = P ${algebra(mv.from)}x${algebra(mv.to)} e.p. ⟶ ${destBoard}; else { const cap = prev[mv.fromBoard][mv.to.r][mv.to.c] ? "x" : "-"; const promo = mv.promotion ? "=" + mv.promotion.toUpperCase() : ""; san = ${pieceLetter(piece.t)} ${mv.fromBoard} ${algebra(mv.from)}${cap}${algebra(mv.to)} ⟶ ${destBoard} ${algebra(mv.to)}${promo}; } setHistory((h) => [...h, (mover === "w" ? "W: " : "B: ") + san]); }
+
+function doMove(mv: Move, mover: Color) { const needPick = needPromotion(mv, boards) && !mv.promotion; if (needPick) { const piece = boards[mv.fromBoard][mv.from.r][mv.from.c]!; setPromotionAsk({ mv, piece }); return; } const res = applyMove(boards, flags, mv); pushHistory(mv, boards, mover); setBoards(res.boards); setFlags(res.flags); setSelected(null); setLegalTargets([]); setTurn(mover === "w" ? "b" : "w"); }
+
+function onSquareClick(board: BoardID, r: number, c: number) { if (gameOver || promotionAsk) return; const human = sideHuman; if (turn !== human) return;
+
+const grid = boards[board];
+const p = grid[r][c];
+
+if (selected) {
+  const legal = generateLegalMovesAll({ boards, flags }, human);
+  const mv = legal.find((m) => m.fromBoard === selected.board && m.from.r === selected.sq.r && m.from.c === selected.sq.c && m.to.r === r && m.to.c === c);
+  if (mv) return doMove(mv, human);
+}
+
+if (p && p.c === human) {
+  const legal = generateLegalMovesAll({ boards, flags }, human).filter((m) => m.fromBoard === board && m.from.r === r && m.from.c === c);
+  setSelected({ board, sq: { r, c } });
+  setLegalTargets(legal.map((m) => m.to));
+} else {
+  setSelected(null);
+  setLegalTargets([]);
+}
+
+}
+
+function resetGame(you: Color = sideHuman) { NEXT_ID = 1; setBoards(initBoards()); setFlags({ moved: new Set<number>(), ep: null }); setTurn("w"); setSelected(null); setLegalTargets([]); setHistory([]); setGameOver(null); setSideHuman(you); setPromotionAsk(null); }
+
+return ( <div className="w-full max-w-6xl mx-auto p-4"> <header className="flex flex-wrap items-center gap-3 justify-between mb-4"> <h1 className="text-2xl font-bold">Alice Chess — Two Boards (A/B) v2</h1> <div className="flex flex-wrap items-center gap-2"> <label className="flex items-center gap-2 text-sm"> <span className="opacity-70">Side:</span> <select className="border rounded px-2 py-1" value={sideHuman} onChange={(e) => resetGame(e.target.value as Color)}> <option value="w">White (先手)</option> <option value="b">Black (後手)</option> </select> </label> <label className="flex items-center gap-2 text-sm"> <span className="opacity-70">Strength:</span> <select className="border rounded px-2 py-1" value={aiMode} onChange={(e) => setAiMode(e.target.value as any)}> <option value="random">Random</option> <option value="greedy">Greedy</option> <option value="minimax2">Minimax (Depth 2)</option> </select> </label> <label className="flex items-center gap-2 text-sm"> <span className="opacity-70">Flip:</span> <input type="checkbox" className="scale-110" checked={flip} onChange={(e) => setFlip(e.target.checked)} /> </label> <button className="rounded-xl px-3 py-1.5 bg-black text-white shadow hover:opacity-90" onClick={() => resetGame(sideHuman)}>New Game</button> </div> </header>
+
+<div className={`grid grid-cols-1 md:grid-cols-[1fr_auto_1fr] gap-2 items-start ${flip ? 'direction-rtl' : ''}`}>
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-lg font-semibold">Board A</div>
+        {(inCheckNow.w || inCheckNow.b) && (<div className="text-xs px-2 py-0.5 rounded bg-amber-200">Check</div>)}
+      </div>
+      <BoardView id="A" grid={boards.A} selected={selected?.board === "A" ? selected.sq : null} legalTargets={selected?.board === "A" ? legalTargets : []} onClick={(r, c) => onSquareClick("A", r, c)} flip={flip} />
+    </div>
+
+    <div className="hidden md:flex flex-col items-center gap-2 px-2">
+      <div className="text-sm opacity-70">Turn</div>
+      <div className={`text-base font-bold px-3 py-1 rounded ${turn === "w" ? "bg-white text-black border" : "bg-black text-white"}`}>{turn === "w" ? "White" : "Black"}</div>
+      {gameOver && (
+        <div className="mt-4 text-center text-sm">
+          {gameOver.result === "checkmate" ? (<><div className="font-semibold">Checkmate</div><div>Winner: {gameOver.winner === "w" ? "White" : "Black"}</div></>) : (<div className="font-semibold">Stalemate</div>)}
+        </div>
+      )}
+    </div>
+
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-lg font-semibold">Board B</div>
+        {(inCheckNow.w || inCheckNow.b) && (<div className="text-xs px-2 py-0.5 rounded bg-amber-200">Check</div>)}
+      </div>
+      <BoardView id="B" grid={boards.B} selected={selected?.board === "B" ? selected.sq : null} legalTargets={selected?.board === "B" ? legalTargets : []} onClick={(r, c) => onSquareClick("B", r, c)} flip={flip} />
+    </div>
+  </div>
+
+  <section className="mt-4">
+    <div className="text-sm font-semibold mb-1">Moves</div>
+    <div className="border rounded p-2 h-40 overflow-auto text-sm bg-white/50">
+      {history.length === 0 ? (<div className="opacity-60">No moves yet.</div>) : (
+        <ol className="list-decimal list-inside space-y-1">{history.map((h, i) => (<li key={i} className="font-mono">{h}</li>))}</ol>
+      )}
+    </div>
+  </section>
+
+  {/* 昇格選択モーダル */}
+  {promotionAsk && (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+      <div className="bg-white rounded-2xl p-4 shadow-xl w-72">
+        <div className="font-semibold mb-2">昇格コマを選択</div>
+        <div className="grid grid-cols-4 gap-2">
+          {(["q","r","b","n"] as PieceType[]).map((pt) => (
+            <button key={pt} onClick={() => { const chosen: Move = { ...promotionAsk.mv, promotion: pt }; doMove(chosen, turn); setPromotionAsk(null); }} className="border rounded-xl p-3 text-3xl hover:bg-neutral-100">
+              {UNICODE[pt][promotionAsk.piece.c]}
+            </button>
+          ))}
+        </div>
+        <button onClick={() => setPromotionAsk(null)} className="mt-3 text-sm text-neutral-500 hover:underline">キャンセル</button>
+      </div>
+    </div>
+  )}
+
+  <p className="mt-4 text-xs opacity-60">Rules in this prototype: Pieces move on the current board then appear on the opposite board at the same square. Checks are only from pieces on the same board. Castling moves king+rook then both warp; en passant supported; promotion with piece selection.</p>
+</div>
+
+); }
+
+function BoardView({ id, grid, selected, legalTargets, onClick, flip }: { id: BoardID; grid: (Piece | null)[][]; selected: Square | null; legalTargets: Square[]; onClick: (r: number, c: number) => void; flip: boolean; }) { const rows = [...Array(8).keys()]; const cols = [...Array(8).keys()]; const rOrder = flip ? rows : rows; // 盤反転は実座標そのまま、描画だけ上下を反転 const cOrder = cols; return ( <div className="inline-block"> <div className="grid grid-cols-8 border-4 border-neutral-800 rounded-xl overflow-hidden shadow-xl"> {rOrder.map((r) => ( <React.Fragment key={r}> {cOrder.map((c) => { const rr = flip ? 7 - r : r; const p = grid[rr][c]; const dark = (rr + c) % 2 === 1; const isSel = selected && selected.r === rr && selected.c === c; const isTarget = legalTargets.some((s) => s.r === rr && s.c === c); return ( <button key={c+":"+rr} onClick={() => onClick(id, rr, c)} className={w-12 h-12 md:w-16 md:h-16 flex items-center justify-center font-serif text-2xl md:text-3xl select-none relative ${dark ? "bg-emerald-700/70" : "bg-emerald-200"} ${isSel ? "ring-4 ring-yellow-400" : ""}} title={${id} ${files[c]}${8 - rr}}> {isTarget && (<span className="absolute w-3 h-3 rounded-full bg-black/30" />)} {p ? (<span className={${p.c === "w" ? "text-white drop-shadow" : "text-black"}}>{UNICODE[p.t][p.c]}</span>) : null} </button> ); })} </React.Fragment> ))} </div> <div className="flex justify-between mt-1 text-[10px] opacity-60"> {files.split("").map((f, i) => (<span key={f} className="w-12 md:w-16 text-center">{flip ? files[7 - i] : f}</span>))} </div> </div> ); }
+
